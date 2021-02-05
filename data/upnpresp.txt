@@ -1,0 +1,9 @@
+HTTP/1.1 200 OK
+CACHE-CONTROL: max-age=1801
+DATE: %DATETIME%
+EXT:
+LOCATION: http://%IP%:49152/wps_device.xml
+SERVER: Lung Trainer, UPnP/1.0, Unspecified
+ST: urn:schemas-wifialliance-org:device:WFADevice:1
+USN: uuid:034b6e1d-62de-d4b1-6533-152c0139fb97::urn:schemas-wifialliance-org:device:WFADevice:1
+

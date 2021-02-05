@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+ <specVersion>
+ <major>1</major>
+ <minor>0</minor>
+ </specVersion>
+ <URLBase>http://%IP%:49152</URLBase>
+ <device>
+ <deviceType>urn:schemas-upnp-org:device:Basic:1</deviceType>
+ <friendlyName>Lung Trainer (%NAME%)</friendlyName>
+ <manufacturer>Lung Trainers, LLC</manufacturer>
+ <manufacturerURL>https://lungtrainers.com/</manufacturerURL>
+ <modelDescription>Lung Trainer Smart Device</modelDescription>
+ <modelName>Lung Trainer</modelName>
+ <modelNumber>1.0</modelNumber>
+ <modelURL>https://lungtrainers.com/</modelURL>
+ <serialNumber>%SERIAL_NUMBER%</serialNumber>
+ <UDN>uuid:%UUID%</UDN>
+ <UPC>%UPC%</UPC>
+ <iconList>
+ <icon>
+ <mimetype>image/png</mimetype>
+ <width>200</width>
+ <height>58</height>
+ <depth>32</depth>
+ <url>https://cdn.shopify.com/s/files/1/1627/4367/files/LungTrainers_REGISTERED_copyB_200x.png?v=1587057185</url>
+ </icon>
+ </iconList>
+ <presentationURL>/index.html</presentationURL>
+ </device>
+</root>
