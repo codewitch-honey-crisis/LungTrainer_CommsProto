@@ -83,7 +83,7 @@ public:
         m_pair.address[0]=0;
         m_pairing = false;
         m_oldConnect=false;
-        m_connect=true;
+        m_connect=false;
         m_pairTS = 0;
         
         pinMode(PIN_CONNECT, INPUT);
@@ -95,15 +95,15 @@ public:
         return true;
     }
     void update() {
+        m_connect = HIGH==digitalRead(PIN_CONNECT);
         if(!g_config.isConfiguring()) {
-            m_connect = HIGH==digitalRead(PIN_CONNECT);
             bool initconnreq = (false==m_oldConnect && true==m_connect);
             m_oldConnect = m_connect;
             if(initconnreq) {
                 if(0==m_pair.type && !m_pairing) {
                     Serial.println(F("Pairing initiated"));
                     m_pairTS=millis();
-                    g_statusLed.set(2,2*g_config.isWiFiSet(),0);     
+                    g_statusLed.set(2,2*g_config.isWiFiSet(),g_config.needsAdditionalConfig(true)); 
                     m_pairing=true;
                     char sz[128];
                     sz[0]=0;
@@ -161,6 +161,7 @@ public:
             }
             
         }
+        m_oldConnect = m_connect;
     }
 
 };

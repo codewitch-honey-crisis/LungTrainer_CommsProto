@@ -136,6 +136,7 @@ static CharacteristicCallbacks chrCallbacks;
 
 void setup() {
     Serial.begin(115200);
+    Serial.println("Lung Trainer booting up.");
     g_statusLed.begin();
     g_config.begin();
     g_connection.begin();
