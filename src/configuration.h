@@ -59,7 +59,7 @@ struct
         int isCalibrated : 1;
         int isClockSet : 1;
     } flags;
-} g_storedCfdData;
+} g_storedCfgData;
 uint32_t g_cfgStartTS;
 class Configuration
 {
@@ -187,29 +187,33 @@ public:
         {
             g_statusLed.set(0, 0, 2);
         }
-        if (!EEPROM.begin(sizeof(g_storedCfdData)))
+        if (!EEPROM.begin(sizeof(g_storedCfgData)))
         {
             Serial.println(F("EEPROM Error - could not mount."));
             while (true)
                 ; // halt
         }
-        memset(&g_storedCfdData, 0, sizeof(g_storedCfdData));
+        memset(&g_storedCfgData, 0, sizeof(g_storedCfgData));
         g_statusLed.set(0, 0, 0);
-        size_t size = EEPROM.readBytes(0, &g_storedCfdData, sizeof(g_storedCfdData));
+        size_t size = EEPROM.readBytes(0, &g_storedCfgData, sizeof(g_storedCfgData));
         // we'll timeout here if the connect button was held down and always rewrite the flash
-        if (5000 < millis() - cfgTS || size != sizeof(g_storedCfdData))
+        if (5000 < millis() - cfgTS || size != sizeof(g_storedCfgData))
         {
-            if (size != sizeof(g_storedCfdData))
+            if (size != sizeof(g_storedCfgData))
             {
                 Serial.println(F("EEPROM Error - Size mismatch, possible a firmare version change?"));
             }
             Serial.println(F("EEPROM rewriting factory configuration"));
             // for sanity - safety
-            memset(this, 0, sizeof(g_storedCfdData));
+            memset(&g_storedCfgData, 0, sizeof(g_storedCfgData));
             // write the default zeroed config
-            size = EEPROM.writeBytes(0, &g_storedCfdData, sizeof(g_storedCfdData));
-            if (size != sizeof(g_storedCfdData) || !EEPROM.commit())
+            size = EEPROM.writeBytes(0, &g_storedCfgData, sizeof(g_storedCfgData));
+            if (size != sizeof(g_storedCfgData) || !EEPROM.commit())
             {
+                if(0!=g_storedCfgData.flags.isClockSet)
+                    Serial.println(F("EEPROM error: clock was marked as set"));
+                if(0!=g_storedCfgData.flags.isNameSet)
+                    Serial.println(F("EEPROM error: name was marked as set."));    
                 Serial.println(F("EEPROM Error - failure writing factory configuration"));
                 while (true)
                     ; // halt
@@ -217,14 +221,17 @@ public:
             // this is so it doesn't later confuse the reset op with a connect op during update()
             delay(1000);
         }
-
         if (needsAdditionalConfig())
         {
             g_cfgStartTS = millis();
             m_isConfiguring = true;
             Serial.println(F("Configuring"));
+            if(0!=g_storedCfgData.flags.isClockSet)
+                Serial.println(F("Configuration of clock was already completed"));
+            if(0!=g_storedCfgData.flags.isNameSet)
+                Serial.println(F("Configuration of name was already completed"));
             g_statusLed.set(0, 0, 1);
-            if (!g_storedCfdData.flags.isCalibrated)
+            if (!g_storedCfgData.flags.isCalibrated)
             {
                 bool shouldStore = true;
                 if (!recalibrate())
@@ -234,10 +241,10 @@ public:
                     // TODO: Should this halt?
                 }
                 else
-                    g_storedCfdData.flags.isCalibrated = 1;
+                    g_storedCfgData.flags.isCalibrated = 1;
                 if (shouldStore)
                 {
-                    if ((sizeof(g_storedCfdData) != EEPROM.writeBytes(0, &g_storedCfdData, sizeof(g_storedCfdData)) || !EEPROM.commit()))
+                    if ((sizeof(g_storedCfgData) != EEPROM.writeBytes(0, &g_storedCfgData, sizeof(g_storedCfgData)) || !EEPROM.commit()))
                     {
                         Serial.println(F("EEPROM error writing configuration"));
                     }
@@ -249,6 +256,7 @@ public:
             }
             if (needsAdditionalConfig(true))
             {
+                Serial.println(F("Configuration data being discovered"));
                 // initialize the bluetooth radio and start discovery
                 char sz[80];
                 snprintf(sz, 80, "Lung Trainer (%s)", displayName());
@@ -261,18 +269,18 @@ public:
                 pScan->setActiveScan(true);
                 pScan->start(0, ble_scan_ended_callback);
                 Serial.println(F("BLE scanning for application"));
-                if (0 != g_storedCfdData.flags.isWifiSet)
+                if (0 != g_storedCfgData.flags.isWifiSet)
                 {
                     // make sure our creds are actually *valid*
                     Serial.print(F("WiFi found stored credentials - connecting to "));
-                    Serial.println(g_storedCfdData.ssid);
-                    WiFi.begin(g_storedCfdData.ssid, g_storedCfdData.passkey);
+                    Serial.println(g_storedCfgData.ssid);
+                    WiFi.begin(g_storedCfgData.ssid, g_storedCfgData.passkey);
                     uint32_t wifiTS = millis();
                     while (6000 > (millis() - wifiTS) && WL_CONNECTED != WiFi.status())
                         ;
                     if (WL_CONNECTED != WiFi.status())
                     {
-                        g_storedCfdData.flags.isWifiSet = 0;
+                        g_storedCfgData.flags.isWifiSet = 0;
                         Serial.println(F("WiFi found stored credentials invalid - disregarding"));
                     }
                     else
@@ -283,7 +291,7 @@ public:
                 int ble = 0;
                 int wifi = 0;
                 bool hasMore = true;
-                if (0 == g_storedCfdData.flags.isWifiSet)
+                if (0 == g_storedCfgData.flags.isWifiSet)
                 {
                     wifi = 2;
                     if (!needsAdditionalConfig(true))
@@ -297,7 +305,7 @@ public:
                 }
                 //Serial.printf("setLed(ble=%d,wifi=%d,1);\r\n",ble,wifi);
                 g_statusLed.set(ble, wifi, 1);
-                if (0 == g_storedCfdData.flags.isWifiSet)
+                if (0 == g_storedCfgData.flags.isWifiSet)
                 {
                     Serial.println(F("WiFi starting WPS scan"));
                     // begin WPS scan
@@ -323,7 +331,7 @@ public:
     }
     bool needsAdditionalConfig(bool connectedOnly = false)
     {
-        return !g_storedCfdData.flags.isNameSet || (!g_storedCfdData.flags.isCalibrated && !connectedOnly) || !g_storedCfdData.flags.isClockSet;
+        return 0==g_storedCfgData.flags.isNameSet || (0==g_storedCfgData.flags.isCalibrated && false==connectedOnly) || 0==g_storedCfgData.flags.isClockSet;
     }
     bool isConfiguring()
     {
@@ -331,11 +339,11 @@ public:
     }
     bool isNameSet()
     {
-        return g_storedCfdData.flags.isNameSet;
+        return 0!=g_storedCfgData.flags.isNameSet;
     }
     const char *name()
     {
-        return g_storedCfdData.name;
+        return g_storedCfgData.name;
     }
     const char *displayName()
     {
@@ -347,22 +355,22 @@ public:
     }
     bool isWiFiSet()
     {
-        return g_storedCfdData.flags.isWifiSet;
+        return 0!=g_storedCfgData.flags.isWifiSet;
     }
     bool setWiFi(const char *ssid, const char *passkey)
     {
-        strncpy(g_storedCfdData.ssid, ssid, 33);
-        strncpy(g_storedCfdData.passkey, passkey, 64);
-        g_storedCfdData.flags.isWifiSet = 1;
+        strncpy(g_storedCfgData.ssid, ssid, 33);
+        strncpy(g_storedCfgData.passkey, passkey, 64);
+        g_storedCfgData.flags.isWifiSet = 1;
         return true;
     }
     const char *ssid()
     {
-        return g_storedCfdData.ssid;
+        return g_storedCfgData.ssid;
     }
     const char *passkey()
     {
-        return g_storedCfdData.passkey;
+        return g_storedCfgData.passkey;
     }
     void update()
     {
@@ -373,7 +381,7 @@ public:
                 if(BLE_WAIT_FOR_USER_PING_TIMOUT<millis()-g_bleUserPingTS) {
                     m_bleIsWaitingForUser = false;
                     // give up configuring for now.
-                    if (sizeof(g_storedCfdData) != EEPROM.writeBytes(0, &g_storedCfdData, sizeof(g_storedCfdData)) || !EEPROM.commit())
+                    if (sizeof(g_storedCfgData) != EEPROM.writeBytes(0, &g_storedCfgData, sizeof(g_storedCfgData)) || !EEPROM.commit())
                     {
                         Serial.println(F("EEPROM error writing configuration"));
                     }
@@ -381,6 +389,7 @@ public:
                     {
                         Serial.println(F("EEPROM configuration saved"));
                     }
+                    Serial.println(F("BLE waiting for user dialog timed out. Giving up on config"));
                      g_statusLed.set(0, 0, 0);
                     m_isConfiguring = false;
                     if (m_isBTInitialized)
@@ -504,7 +513,7 @@ public:
                             Serial.print(F(" - "));
                             Serial.println(t);
                             g_clock.adjust(DateTime(tt));
-                            g_storedCfdData.flags.isClockSet = 1;
+                            g_storedCfgData.flags.isClockSet = 1;
                             Serial.print(F("BLE set clock to "));
                             Serial.println(g_clock.now().toString(szt));
                             m_bleIsWaitingForUser = true;
@@ -521,14 +530,14 @@ public:
                     Serial.println(F("BLE configuration service not found."));
                 }
             }
-            else if (0 != g_storedCfdData.flags.isWifiSet && WL_CONNECTED == WiFi.status())
+            else if (0 != g_storedCfgData.flags.isWifiSet && WL_CONNECTED == WiFi.status())
             {
                 m_isBTInitialized = false;
                 NimBLEDevice::deinit(true);
                 g_statusLed.set(0, 1, 1);
                 //Serial.println(F("WiFi retrieving configuration"));
                 bool shouldSave = false;
-                if (!g_storedCfdData.flags.isNameSet)
+                if (0==g_storedCfgData.flags.isNameSet)
                 {
                     WiFiClient client;
                     Serial.println(F("WiFi fetching generated name"));
@@ -562,9 +571,9 @@ public:
                                     const char *sz = doc[0].as<char *>();
                                     Serial.print(F("WiFi retrieved name: "));
                                     Serial.println(sz);
-                                    g_storedCfdData.name[63] = 0;
-                                    strncpy(g_storedCfdData.name, sz, 63);
-                                    g_storedCfdData.flags.isNameSet = 1;
+                                    g_storedCfgData.name[63] = 0;
+                                    strncpy(g_storedCfgData.name, sz, 63);
+                                    g_storedCfgData.flags.isNameSet = 1;
                                     shouldSave = true;
                                     break;
                                 }
@@ -572,7 +581,7 @@ public:
                         }
                     }
                 }
-                if (!g_storedCfdData.flags.isClockSet)
+                if (0==g_storedCfgData.flags.isClockSet)
                 {
                     WiFiClient client;
                     Serial.println(F("WiFi fetching time"));
@@ -615,7 +624,7 @@ public:
                                     Serial.print(F(" - "));
                                     Serial.println(t);
                                     g_clock.adjust(DateTime(tt));
-                                    g_storedCfdData.flags.isClockSet = 1;
+                                    g_storedCfgData.flags.isClockSet = 1;
                                     Serial.print(F("WiFi set clock to "));
                                     Serial.println(g_clock.now().toString(szt));
                                     shouldSave = true;
@@ -628,7 +637,7 @@ public:
 
                 if (shouldSave)
                 {
-                    if (sizeof(g_storedCfdData) != EEPROM.writeBytes(0, &g_storedCfdData, sizeof(g_storedCfdData)) || !EEPROM.commit())
+                    if (sizeof(g_storedCfgData) != EEPROM.writeBytes(0, &g_storedCfgData, sizeof(g_storedCfgData)) || !EEPROM.commit())
                     {
                         Serial.println(F("EEPROM error writing configuration"));
                     }
@@ -644,6 +653,7 @@ public:
                     }
                     else
                     {
+                        Serial.println(F("WiFi based configuration complete"));
                         //Serial.println("setLed(0,0,0);\r\n");
                         g_statusLed.set(0, 0, 0);
                         m_isConfiguring = false;
@@ -659,6 +669,7 @@ public:
                 {
                     if (!needsAdditionalConfig(true))
                     {
+                        Serial.println(F("WiFi no additional configuration needed."));
                         //Serial.println("setLed(0,0,0);\r\n");
                         g_statusLed.set(0, 0, 0);
                         m_isConfiguring = false;
@@ -687,6 +698,7 @@ public:
             }
             if (CONFIG_TIMEOUT < millis() - g_cfgStartTS)
             {
+                Serial.println(F("Configuration timed out. Giving up on config"));
                 g_statusLed.set(0, 0, 0);
                 m_isConfiguring = false;
                 if (m_isBTInitialized)
@@ -709,22 +721,22 @@ public:
                     uint8_t opc = *pData;
                     switch(opc) {
                         case 1:
-                            strncpy(g_storedCfdData.name,(const char*)(pData+1),min(length-1,(size_t)63));
-                            g_storedCfdData.name[63]=0;
-                            g_storedCfdData.flags.isNameSet = 1;
+                            strncpy(g_storedCfgData.name,(const char*)(pData+1),min(length-1,(size_t)63));
+                            g_storedCfgData.name[63]=0;
+                            g_storedCfgData.flags.isNameSet = 1;
                             Serial.print(F("BLE config set name to "));
-                            Serial.println(g_storedCfdData.name);
+                            Serial.println(g_storedCfgData.name);
                             g_bleUserPingTS = millis();
                             g_cfgStartTS = millis(); // prevent cfg from turning off the radio
                             break;
                         case 2:
-                            strncpy(g_storedCfdData.ssid,(const char*)(pData+1),min(length-1,(size_t)32));
-                            g_storedCfdData.ssid[32]=0;
-                            strncpy(g_storedCfdData.passkey,(const char*)(pData+34),min(length-1,(size_t)63));
-                            g_storedCfdData.passkey[63]=0;
-                            g_storedCfdData.flags.isWifiSet = 1;
+                            strncpy(g_storedCfgData.ssid,(const char*)(pData+1),min(length-1,(size_t)32));
+                            g_storedCfgData.ssid[32]=0;
+                            strncpy(g_storedCfgData.passkey,(const char*)(pData+34),min(length-1,(size_t)63));
+                            g_storedCfgData.passkey[63]=0;
+                            g_storedCfgData.flags.isWifiSet = 1;
                             Serial.print(F("BLE set SSID to "));
-                            Serial.println(g_storedCfdData.ssid);
+                            Serial.println(g_storedCfgData.ssid);
                             g_bleUserPingTS = millis();
                             g_cfgStartTS = millis(); // prevent cfg from turning off the radio
                             break;
