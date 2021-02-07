@@ -8,12 +8,16 @@
 #include <WiFiClient.h>
 #include <WiFiUDP.h>
 #include <ArduinoJson.h>
+#include <RTClib.h>
 #include "status_led.h"
+
 #define BLE_SERVICE_UUID "F9A2F78B-EE0A-43C6-A72D-EB606EA56D9C"
 static NimBLEUUID g_blesvcid(BLE_SERVICE_UUID);
 #define BLE_CFG_SERVICE_UUID "5AB457FD-FBAD-475B-97A0-29900940A47B"
 static NimBLEUUID g_blecfgsvcid(BLE_CFG_SERVICE_UUID);
-
+#define BLE_CFG_CHARCTERISTIC_UUID "7F2D2A4E-BA58-4E8F-8B96-6C8BDCBA629E"
+static NimBLEUUID g_blecfgcharid(BLE_CFG_CHARCTERISTIC_UUID);
+#define BLE_WAIT_FOR_USER_PING_TIMOUT 3000
 #define CONFIG_TIMEOUT 30000
 
 #define ESP_WPS_MODE WPS_TYPE_PBC
@@ -36,6 +40,8 @@ static void wps_init_config();
 static void wifi_callback(WiFiEvent_t event, system_event_info_t info);
 static esp_wps_config_t g_wifi_wps_config;
 static NimBLEAdvertisedDevice *g_ble_adv_device;
+static RTC_DS1307 g_clock;
+uint32_t g_bleUserPingTS;
 class Configuration
 {
 private:
@@ -62,7 +68,9 @@ private:
     std::atomic_bool m_isBTInitialized;
 
     uint32_t m_cfgStartTS;
-
+    bool m_bleIsWaitingForUser;
+    //uint32_t m_bleWaitingForUserStartTS;
+    
     bool recalibrate()
     {
         // TODO: do recalibration here.
@@ -162,9 +170,13 @@ private:
 public:
     void begin()
     {
+        
         m_cfgStartTS = 0;
         m_isBTInitialized = false;
         g_ble_adv_device = nullptr;
+        m_bleIsWaitingForUser=false;
+        //m_bleWaitingForUserStartTS=0;
+        g_bleUserPingTS = millis();
         pinMode(PIN_CONNECT, INPUT);
         WiFi.onEvent(wifi_callback);
         m_isConfiguring = false;
@@ -355,6 +367,30 @@ public:
     {
         if (m_isConfiguring)
         {
+            if(m_bleIsWaitingForUser) {
+                
+                if(BLE_WAIT_FOR_USER_PING_TIMOUT<millis()-g_bleUserPingTS) {
+                    m_bleIsWaitingForUser = false;
+                    // give up configuring for now.
+                    if (sizeof(m_stored) != EEPROM.writeBytes(0, &m_stored, sizeof(m_stored)) || !EEPROM.commit())
+                    {
+                        Serial.println(F("EEPROM error writing configuration"));
+                    }
+                    else
+                    {
+                        Serial.println(F("EEPROM configuration saved"));
+                    }
+                     g_statusLed.set(0, 0, 0);
+                    m_isConfiguring = false;
+                    if (m_isBTInitialized)
+                    {
+                        NimBLEDevice::deinit(true);
+                        m_isBTInitialized = false;
+                    }
+                    WiFi.disconnect(true, true);
+                    return;
+                }
+            }
             if (m_isBTInitialized && nullptr != g_ble_adv_device)
             {
                 WiFi.disconnect(true, true);
@@ -434,36 +470,49 @@ public:
                 /** Now we can read/write/subscribe the charateristics of the services we are interested in */
                 NimBLERemoteService *pSvc = nullptr;
                 NimBLERemoteCharacteristic *pChr = nullptr;
-                NimBLERemoteDescriptor *pDsc = nullptr;
+                //NimBLERemoteDescriptor *pDsc = nullptr;
 
                 pSvc = pClient->getService(g_blecfgsvcid);
                 if (pSvc)
                 { /** make sure it's not null */
-                    pChr = pSvc->getCharacteristic("BCF0");
+                    pChr = pSvc->getCharacteristic(g_blecfgcharid);
 
                     if (pChr)
-                    { /** make sure it's not null */
-                        if (pChr->canRead())
-                        {
-                            Serial.print(F("BLE read from "));
-                            Serial.print(pChr->getUUID().toString().c_str());
-                            Serial.print(F(" Value: "));
-                            Serial.println(pChr->readValue().c_str());
-                        }
-
-                        /** registerForNotify() has been deprecated and replaced with subscribe() / unsubscribe().
-                         *  Subscribe parameter defaults are: notifications=true, notifyCallback=nullptr, response=false.
-                         *  Unsubscribe parameter defaults are: response=false.
-                         */
+                    { 
                         if (pChr->canNotify())
                         {
-                            //if(!pChr->registerForNotify(notifyCB)) {
-                            /*if(!pChr->subscribe(true, notifyCB)) {
+                            if(!pChr->subscribe(true, notifyCB)) {
                                 // Disconnect if subscribe failed
+                                Serial.println("BLE could not subscribe to configuration service");
                                 pClient->disconnect();
                                 return;
-                            }*/
+                            }
                         }
+                        if (pChr->canRead())
+                        {
+                            Serial.print(F("BLE read time from "));
+                            Serial.print(pChr->getUUID().toString().c_str());
+                            
+                            Serial.print(F(" Value: "));
+                            uint32_t t =pChr->readValue<uint32_t>();
+                            time_t tt = (time_t)t;
+                            char szt[80];
+                            tm ttm=*localtime(&tt);
+                            strftime(szt,80,"%x - %I:%M%p",&ttm);
+                            Serial.print(szt);
+                            Serial.print(F(" - "));
+                            Serial.println(t);
+                            g_clock.adjust(DateTime(tt));
+                            m_stored.flags.isClockSet = 1;
+                            Serial.print(F("BLE set clock to "));
+                            Serial.println(g_clock.now().toString(szt));
+                            m_bleIsWaitingForUser = true;
+                            // the user will pop a UI now so we need to wait for pings
+                            g_bleUserPingTS = millis();
+
+                        }
+
+                        
                     }
                 }
                 else
@@ -552,14 +601,22 @@ public:
                                 {
                                     ArduinoJson::StaticJsonDocument<2048> doc;
                                     deserializeJson(doc, client);
-                                    uint32_t t = doc["unixtime"].as<long>();
-                                    const char *sz = doc["datetime"].as<char *>();
+                                    tm ttm;
+                                    char szt[80];
+                                        
+                                    uint32_t t = doc["unixtime"].as<long>()+doc["raw_offset"].as<long>();
+                                    //const char *sz = doc["datetime"].as<char *>();
                                     Serial.print(F("WiFi retrieved time: "));
-                                    Serial.print(sz);
+                                    time_t tt = (time_t)t;
+                                    ttm=*localtime(&tt);
+                                    strftime(szt,80,"%x - %I:%M%p",&ttm);
+                                    Serial.print(szt);
                                     Serial.print(F(" - "));
                                     Serial.println(t);
-                                    // TODO: set the clock hardware
+                                    g_clock.adjust(DateTime(tt));
                                     m_stored.flags.isClockSet = 1;
+                                    Serial.print(F("WiFi set clock to "));
+                                    Serial.println(g_clock.now().toString(szt));
                                     shouldSave = true;
                                     break;
                                 }
@@ -577,7 +634,7 @@ public:
                     else
                     {
 
-                        Serial.println(F("Configuration saved to EEPROM"));
+                        Serial.println(F("EEPROM configuration saved"));
                     }
                     if (needsAdditionalConfig(true))
                     {
@@ -639,6 +696,13 @@ public:
                 WiFi.disconnect(true, true);
             }
         }
+    }
+    static void notifyCB(NimBLERemoteCharacteristic* pRemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify){
+        if(isNotify && length==1 && 0==*pData) {
+            g_bleUserPingTS = millis();
+            Serial.println("BLE config idle ping from application. waiting on user");
+        }
+        
     }
 };
 Configuration g_config;
@@ -718,4 +782,6 @@ static void wifi_callback(WiFiEvent_t event, system_event_info_t info)
 static void ble_scan_ended_callback(NimBLEScanResults results)
 {
 }
+
+
 #endif
