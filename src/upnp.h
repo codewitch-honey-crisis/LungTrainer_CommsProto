@@ -216,7 +216,7 @@ public:
                                     size_t s = f.readBytes(m_responseBuffer, sizeof(m_responseBuffer) - 1);
                                     m_responseBuffer[s] = 0;
                                     char dtbuf[512];
-                                    time_t now = time(0);
+                                    time_t now = g_clock.now().unixtime();
                                     struct tm tm = *gmtime(&now);
                                     strftime(dtbuf, sizeof dtbuf, "%a, %d %b %Y %H:%M:%S %Z", &tm);
                                     str_replace(m_responseBuffer, sizeof(m_responseBuffer), "%DATETIME%", dtbuf);

@@ -4,13 +4,14 @@
 #include <EEPROM.h>
 #include <WiFi.h>
 #include <NimBLEDevice.h>
+#include <esp_wifi.h>
 #include <esp_wps.h>
 #include <WiFiClient.h>
 #include <WiFiUDP.h>
 #include <ArduinoJson.h>
 #include <RTClib.h>
 #include "status_led.h"
-
+#include <Adafruit_RA8875.h>
 #define BLE_SERVICE_UUID "F9A2F78B-EE0A-43C6-A72D-EB606EA56D9C"
 static NimBLEUUID g_blesvcid(BLE_SERVICE_UUID);
 #define BLE_CFG_SERVICE_UUID "5AB457FD-FBAD-475B-97A0-29900940A47B"
@@ -28,6 +29,9 @@ static NimBLEUUID g_blecfgcharid(BLE_CFG_CHARCTERISTIC_UUID);
 
 #define PIN_CONNECT 39
 
+#define RA8875_CS 5
+#define RA8875_RESET 15
+
 #define NAME_GEN_SVC_URL "http://namey.muffinlabs.com/name.json?type=female"
 #define NAME_GEN_SVC_HOST "namey.muffinlabs.com"
 #define NAME_GEN_SVC_PATH "/name.json?type=female"
@@ -42,6 +46,7 @@ static esp_wps_config_t g_wifi_wps_config;
 static NimBLEAdvertisedDevice *g_ble_adv_device;
 static RTC_DS1307 g_clock;
 uint32_t g_bleUserPingTS;
+Adafruit_RA8875 g_tft = Adafruit_RA8875(RA8875_CS, RA8875_RESET);
 struct
 {
     char name[64];
@@ -49,8 +54,8 @@ struct
     char passkey[64];
     struct
     {
-        int32_t offsetX;
-        int32_t offsetY;
+        tsPoint_t lcdPoints[3];
+        tsPoint_t touchPoints[3];
     } calibration;
     struct
     {
@@ -61,17 +66,15 @@ struct
     } flags;
 } g_storedCfgData;
 uint32_t g_cfgStartTS;
+std::atomic_bool g_isConfiguring;
+std::atomic_bool g_bleIsInitialized;
+
 class Configuration
 {
 private:
-    
-    std::atomic_bool m_isConfiguring;
-    std::atomic_bool m_isBTInitialized;
-
-    
     bool m_bleIsWaitingForUser;
     //uint32_t m_bleWaitingForUserStartTS;
-    
+
     bool recalibrate()
     {
         // TODO: do recalibration here.
@@ -89,7 +92,8 @@ private:
                 Serial.println(F("BLE Advertised Application found"));
 
                 NimBLEDevice::getScan()->stop();
-                WiFi.disconnect(true, true);
+                WiFi.mode(WIFI_MODE_NULL);
+                //WiFi.disconnect(true, true);
                 g_statusLed.set(1, 0, 1);
 
                 g_ble_adv_device = advertisedDevice;
@@ -167,20 +171,35 @@ private:
             }
         }
     };
+    
 
 public:
     void begin()
     {
-        
+        if (!g_tft.begin(RA8875_800x480))
+        {
+            Serial.println("RA8875 screen was not found or could not be initialized");
+            while (true)
+                ; // halt
+        }
+        g_tft.displayOn(true);
+        g_tft.GPIOX(true);                              // Enable TFT - display enable tied to GPIOX
+        g_tft.PWM1config(true, RA8875_PWM_CLK_DIV1024); // PWM output for backlight
+        g_tft.PWM1out(255);
+        // Enable the touch screen
+        g_tft.touchEnable(true);
+
+        g_tft.fillScreen(RA8875_WHITE);
+
         g_cfgStartTS = 0;
-        m_isBTInitialized = false;
+        g_bleIsInitialized = false;
         g_ble_adv_device = nullptr;
-        m_bleIsWaitingForUser=false;
+        m_bleIsWaitingForUser = false;
         //m_bleWaitingForUserStartTS=0;
         g_bleUserPingTS = millis();
         pinMode(PIN_CONNECT, INPUT);
         WiFi.onEvent(wifi_callback);
-        m_isConfiguring = false;
+        g_isConfiguring = false;
 
         uint32_t cfgTS = millis();
         while (0 != digitalRead(PIN_CONNECT))
@@ -210,10 +229,10 @@ public:
             size = EEPROM.writeBytes(0, &g_storedCfgData, sizeof(g_storedCfgData));
             if (size != sizeof(g_storedCfgData) || !EEPROM.commit())
             {
-                if(0!=g_storedCfgData.flags.isClockSet)
+                if (0 != g_storedCfgData.flags.isClockSet)
                     Serial.println(F("EEPROM error: clock was marked as set"));
-                if(0!=g_storedCfgData.flags.isNameSet)
-                    Serial.println(F("EEPROM error: name was marked as set."));    
+                if (0 != g_storedCfgData.flags.isNameSet)
+                    Serial.println(F("EEPROM error: name was marked as set."));
                 Serial.println(F("EEPROM Error - failure writing factory configuration"));
                 while (true)
                     ; // halt
@@ -224,11 +243,11 @@ public:
         if (needsAdditionalConfig())
         {
             g_cfgStartTS = millis();
-            m_isConfiguring = true;
+            g_isConfiguring = true;
             Serial.println(F("Configuring"));
-            if(0!=g_storedCfgData.flags.isClockSet)
+            if (0 != g_storedCfgData.flags.isClockSet)
                 Serial.println(F("Configuration of clock was already completed"));
-            if(0!=g_storedCfgData.flags.isNameSet)
+            if (0 != g_storedCfgData.flags.isNameSet)
                 Serial.println(F("Configuration of name was already completed"));
             g_statusLed.set(0, 0, 1);
             if (!g_storedCfgData.flags.isCalibrated)
@@ -261,7 +280,7 @@ public:
                 char sz[80];
                 snprintf(sz, 80, "Lung Trainer (%s)", displayName());
                 NimBLEDevice::init(sz);
-                m_isBTInitialized = true;
+                g_bleIsInitialized = true;
                 NimBLEScan *pScan = NimBLEDevice::getScan();
                 pScan->setAdvertisedDeviceCallbacks(new BleAdvertisedDeviceCallbacks());
                 pScan->setInterval(45);
@@ -318,28 +337,28 @@ public:
             else
             {
                 //Serial.println("setLed(0,0,0);\r\n");
-                m_isConfiguring = false;
+                g_isConfiguring = false;
                 g_statusLed.set(0, 0, 0);
             }
         }
         else
         {
             //Serial.println("setLed(0,0,0);\r\n");
-            m_isConfiguring = false;
+            g_isConfiguring = false;
             g_statusLed.set(0, 0, 0);
         }
     }
     bool needsAdditionalConfig(bool connectedOnly = false)
     {
-        return 0==g_storedCfgData.flags.isNameSet || (0==g_storedCfgData.flags.isCalibrated && false==connectedOnly) || 0==g_storedCfgData.flags.isClockSet;
+        return 0 == g_storedCfgData.flags.isNameSet || (0 == g_storedCfgData.flags.isCalibrated && false == connectedOnly) || 0 == g_storedCfgData.flags.isClockSet;
     }
     bool isConfiguring()
     {
-        return m_isConfiguring;
+        return g_isConfiguring;
     }
     bool isNameSet()
     {
-        return 0!=g_storedCfgData.flags.isNameSet;
+        return 0 != g_storedCfgData.flags.isNameSet;
     }
     const char *name()
     {
@@ -355,7 +374,7 @@ public:
     }
     bool isWiFiSet()
     {
-        return 0!=g_storedCfgData.flags.isWifiSet;
+        return 0 != g_storedCfgData.flags.isWifiSet;
     }
     bool setWiFi(const char *ssid, const char *passkey)
     {
@@ -374,11 +393,13 @@ public:
     }
     void update()
     {
-        if (m_isConfiguring)
+        if (g_isConfiguring)
         {
-            if(m_bleIsWaitingForUser) {
-                
-                if(BLE_WAIT_FOR_USER_PING_TIMOUT<millis()-g_bleUserPingTS) {
+            if (m_bleIsWaitingForUser)
+            {
+
+                if (BLE_WAIT_FOR_USER_PING_TIMOUT < millis() - g_bleUserPingTS)
+                {
                     m_bleIsWaitingForUser = false;
                     // give up configuring for now.
                     if (sizeof(g_storedCfgData) != EEPROM.writeBytes(0, &g_storedCfgData, sizeof(g_storedCfgData)) || !EEPROM.commit())
@@ -390,20 +411,24 @@ public:
                         Serial.println(F("EEPROM configuration saved"));
                     }
                     Serial.println(F("BLE waiting for user dialog timed out. Giving up on config"));
-                     g_statusLed.set(0, 0, 0);
-                    m_isConfiguring = false;
-                    if (m_isBTInitialized)
+                    g_statusLed.set(0, 0, 0);
+                    g_isConfiguring = false;
+                    if (g_bleIsInitialized)
                     {
                         NimBLEDevice::deinit(true);
-                        m_isBTInitialized = false;
+                        g_bleIsInitialized = false;
                     }
-                    WiFi.disconnect(true, true);
+                    //esp_wifi_stop();
+                    //WiFi.mode(WIFI_MODE_NULL);
+                    WiFi.disconnect(); //(true, true);
                     return;
                 }
             }
-            if (m_isBTInitialized && nullptr != g_ble_adv_device)
+            if (g_bleIsInitialized && nullptr != g_ble_adv_device)
             {
-                WiFi.disconnect(true, true);
+                //esp_wifi_stop();
+                //WiFi.mode(WIFI_MODE_NULL);
+                WiFi.disconnect(); //true, true);
                 g_statusLed.set(1, 0, 1);
 
                 NimBLEAdvertisedDevice *advdev = g_ble_adv_device;
@@ -488,27 +513,35 @@ public:
                     pChr = pSvc->getCharacteristic(g_blecfgcharid);
 
                     if (pChr)
-                    { 
+                    {
                         if (pChr->canNotify())
                         {
-                            if(!pChr->subscribe(true, notifyCB)) {
+                            g_bleUserPingTS = millis();
+                            m_bleIsWaitingForUser = true;                            
+                            
+                            if (!pChr->subscribe(true, notifyCB))
+                            {
+                                m_bleIsWaitingForUser = false;
                                 // Disconnect if subscribe failed
                                 Serial.println(F("BLE could not subscribe to configuration service"));
                                 pClient->disconnect();
                                 return;
                             }
+                            Serial.println(F("BLE waiting for notifications from configuration service"));
+                            
+                            
                         }
                         if (pChr->canRead())
                         {
                             Serial.print(F("BLE read time from "));
                             Serial.print(pChr->getUUID().toString().c_str());
-                            
+
                             Serial.print(F(" Value: "));
-                            uint32_t t =pChr->readValue<uint32_t>();
+                            uint32_t t = pChr->readValue<uint32_t>();
                             time_t tt = (time_t)t;
                             char szt[80];
-                            tm ttm=*localtime(&tt);
-                            strftime(szt,80,"%x - %I:%M%p",&ttm);
+                            tm ttm = *localtime(&tt);
+                            strftime(szt, 80, "%x - %I:%M%p", &ttm);
                             Serial.print(szt);
                             Serial.print(F(" - "));
                             Serial.println(t);
@@ -516,13 +549,10 @@ public:
                             g_storedCfgData.flags.isClockSet = 1;
                             Serial.print(F("BLE set clock to "));
                             Serial.println(g_clock.now().toString(szt));
-                            m_bleIsWaitingForUser = true;
+                            
                             // the user will pop a UI now so we need to wait for pings
-                            g_bleUserPingTS = millis();
-
+                            
                         }
-
-                        
                     }
                 }
                 else
@@ -532,12 +562,12 @@ public:
             }
             else if (0 != g_storedCfgData.flags.isWifiSet && WL_CONNECTED == WiFi.status())
             {
-                m_isBTInitialized = false;
+                g_bleIsInitialized = false;
                 NimBLEDevice::deinit(true);
                 g_statusLed.set(0, 1, 1);
                 //Serial.println(F("WiFi retrieving configuration"));
                 bool shouldSave = false;
-                if (0==g_storedCfgData.flags.isNameSet)
+                if (0 == g_storedCfgData.flags.isNameSet)
                 {
                     WiFiClient client;
                     Serial.println(F("WiFi fetching generated name"));
@@ -581,7 +611,7 @@ public:
                         }
                     }
                 }
-                if (0==g_storedCfgData.flags.isClockSet)
+                if (0 == g_storedCfgData.flags.isClockSet)
                 {
                     WiFiClient client;
                     Serial.println(F("WiFi fetching time"));
@@ -613,13 +643,13 @@ public:
                                     deserializeJson(doc, client);
                                     tm ttm;
                                     char szt[80];
-                                        
-                                    uint32_t t = doc["unixtime"].as<long>()+doc["raw_offset"].as<long>();
+
+                                    uint32_t t = doc["unixtime"].as<long>() + doc["raw_offset"].as<long>();
                                     //const char *sz = doc["datetime"].as<char *>();
                                     Serial.print(F("WiFi retrieved time: "));
                                     time_t tt = (time_t)t;
-                                    ttm=*localtime(&tt);
-                                    strftime(szt,80,"%x - %I:%M%p",&ttm);
+                                    ttm = *localtime(&tt);
+                                    strftime(szt, 80, "%x - %I:%M%p", &ttm);
                                     Serial.print(szt);
                                     Serial.print(F(" - "));
                                     Serial.println(t);
@@ -656,13 +686,15 @@ public:
                         Serial.println(F("WiFi based configuration complete"));
                         //Serial.println("setLed(0,0,0);\r\n");
                         g_statusLed.set(0, 0, 0);
-                        m_isConfiguring = false;
-                        if (m_isBTInitialized)
+                        g_isConfiguring = false;
+                        if (g_bleIsInitialized)
                         {
                             NimBLEDevice::deinit(true);
-                            m_isBTInitialized = false;
+                            g_bleIsInitialized = false;
                         }
-                        WiFi.disconnect(true, true);
+                        //esp_wifi_stop();
+                        //WiFi.mode(WIFI_MODE_NULL);
+                        WiFi.disconnect(); //true, true);
                     }
                 }
                 else
@@ -672,22 +704,24 @@ public:
                         Serial.println(F("WiFi no additional configuration needed."));
                         //Serial.println("setLed(0,0,0);\r\n");
                         g_statusLed.set(0, 0, 0);
-                        m_isConfiguring = false;
-                        if (m_isBTInitialized)
+                        g_isConfiguring = false;
+                        if (g_bleIsInitialized)
                         {
                             NimBLEDevice::deinit(true);
-                            m_isBTInitialized = false;
+                            g_bleIsInitialized = false;
                         }
-                        WiFi.disconnect(true, true);
+                        //WiFi.mode(WIFI_MODE_NULL);
+                        //esp_wifi_stop();
+                        WiFi.disconnect(); //(true, true);
                     }
                 }
             }
-            if (needsAdditionalConfig(true) && !m_isBTInitialized)
+            if (needsAdditionalConfig(true) && !g_bleIsInitialized)
             {
                 char sz[80];
                 snprintf(sz, 80, "Lung Trainer (%s)", displayName());
                 NimBLEDevice::init(sz);
-                m_isBTInitialized = true;
+                g_bleIsInitialized = true;
                 NimBLEScan *pScan = NimBLEDevice::getScan();
                 pScan->setAdvertisedDeviceCallbacks(new BleAdvertisedDeviceCallbacks());
                 pScan->setInterval(45);
@@ -700,52 +734,61 @@ public:
             {
                 Serial.println(F("Configuration timed out. Giving up on config"));
                 g_statusLed.set(0, 0, 0);
-                m_isConfiguring = false;
-                if (m_isBTInitialized)
+                g_isConfiguring = false;
+                if (g_bleIsInitialized)
                 {
                     NimBLEDevice::deinit(true);
-                    m_isBTInitialized = false;
+                    g_bleIsInitialized = false;
                 }
-                WiFi.disconnect(true, true);
+                WiFi.disconnect(); //true, true);
+                //WiFi.mode(WIFI_MODE_NULL);
+                //esp_wifi_stop();
             }
         }
     }
-    static void notifyCB(NimBLERemoteCharacteristic* pRemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify){
-        if(isNotify) {
-            if(1==length && 0==*pData) {
+    static void notifyCB(NimBLERemoteCharacteristic *pRemoteCharacteristic, uint8_t *pData, size_t length, bool isNotify)
+    {
+        if (isNotify)
+        {
+            if (1 == length && 0 == *pData)
+            {
                 g_bleUserPingTS = millis();
                 g_cfgStartTS = millis(); // prevent cfg from turning off the radio
                 Serial.println(F("BLE config idle ping from application. waiting on user"));
-            } else {
-                if(1<length) {
+            }
+            else
+            {
+                if (1 < length)
+                {
                     uint8_t opc = *pData;
-                    switch(opc) {
-                        case 1:
-                            strncpy(g_storedCfgData.name,(const char*)(pData+1),min(length-1,(size_t)63));
-                            g_storedCfgData.name[63]=0;
-                            g_storedCfgData.flags.isNameSet = 1;
-                            Serial.print(F("BLE config set name to "));
-                            Serial.println(g_storedCfgData.name);
-                            g_bleUserPingTS = millis();
-                            g_cfgStartTS = millis(); // prevent cfg from turning off the radio
-                            break;
-                        case 2:
-                            strncpy(g_storedCfgData.ssid,(const char*)(pData+1),min(length-1,(size_t)32));
-                            g_storedCfgData.ssid[32]=0;
-                            strncpy(g_storedCfgData.passkey,(const char*)(pData+34),min(length-1,(size_t)63));
-                            g_storedCfgData.passkey[63]=0;
-                            g_storedCfgData.flags.isWifiSet = 1;
-                            Serial.print(F("BLE set SSID to "));
-                            Serial.println(g_storedCfgData.ssid);
-                            g_bleUserPingTS = millis();
-                            g_cfgStartTS = millis(); // prevent cfg from turning off the radio
-                            break;
-                        
+                    switch (opc)
+                    {
+                    case 1:
+                        strncpy(g_storedCfgData.name, (const char *)(pData + 1), min(length - 1, (size_t)63));
+                        g_storedCfgData.name[63] = 0;
+                        g_storedCfgData.flags.isNameSet = 1;
+                        Serial.print(F("BLE config set name to "));
+                        Serial.println(g_storedCfgData.name);
+                        g_bleUserPingTS = millis();
+                        g_cfgStartTS = millis(); // prevent cfg from turning off the radio
+                        break;
+                    case 2:
+                        strncpy(g_storedCfgData.ssid, (const char *)(pData + 1), min(length - 1, (size_t)32));
+                        g_storedCfgData.ssid[32] = 0;
+                        strncpy(g_storedCfgData.passkey, (const char *)(pData + 34), min(length - 1, (size_t)63));
+                        g_storedCfgData.passkey[63] = 0;
+                        g_storedCfgData.flags.isWifiSet = 1;
+                        Serial.print(F("BLE set SSID to "));
+                        Serial.println(g_storedCfgData.ssid);
+                        Serial.print(F("BLE set passkey to "));
+                        Serial.println(g_storedCfgData.passkey);
+                        g_bleUserPingTS = millis();
+                        g_cfgStartTS = millis(); // prevent cfg from turning off the radio
+                        break;
                     }
                 }
             }
         }
-        
     }
 };
 Configuration g_config;
@@ -788,35 +831,57 @@ static void wifi_callback(WiFiEvent_t event, system_event_info_t info)
         //Serial.println(WiFi.psk().c_str());
         Serial.print(F("WiFi got IP: "));
         Serial.println(WiFi.localIP());
+        if (g_bleIsInitialized)
+        {
+            Serial.println(F("BLE shutting down radio"));
+            NimBLEDevice::deinit(true);
+            g_bleIsInitialized = false;
+        }
+
         break;
     case SYSTEM_EVENT_STA_DISCONNECTED:
-        if (!g_config.isWiFiSet())
+        if (g_isConfiguring)
         {
-            Serial.println(F("WiFi disconnected from station, attempting reconnection"));
-            WiFi.reconnect();
+            if (!g_config.isWiFiSet())
+            {
+                Serial.println(F("WiFi disconnected from station, attempting reconnection"));
+                WiFi.reconnect();
+            }
         }
         break;
     case SYSTEM_EVENT_STA_WPS_ER_SUCCESS:
-        Serial.println(F("WiFi WPS successful, stopping WPS and connecting."));
-        esp_wifi_wps_disable();
-        delay(10);
-        WiFi.begin();
+        if (g_isConfiguring)
+        {
+            Serial.println(F("WiFi WPS successful, stopping WPS and connecting."));
+            esp_wifi_wps_disable();
+            delay(10);
+            WiFi.begin();
+        }
         break;
     case SYSTEM_EVENT_STA_WPS_ER_FAILED:
-        Serial.println(F("WiFi WPS failed, retrying"));
-        esp_wifi_wps_disable();
-        esp_wifi_wps_enable(&g_wifi_wps_config);
-        esp_wifi_wps_start(0);
+        if (g_isConfiguring)
+        {
+            Serial.println(F("WiFi WPS failed, retrying"));
+            esp_wifi_wps_disable();
+            esp_wifi_wps_enable(&g_wifi_wps_config);
+            esp_wifi_wps_start(0);
+        }
         break;
     case SYSTEM_EVENT_STA_WPS_ER_TIMEOUT:
-        Serial.println(F("WiFi WPS timeout, retrying"));
-        esp_wifi_wps_disable();
-        esp_wifi_wps_enable(&g_wifi_wps_config);
-        esp_wifi_wps_start(0);
+        if (g_isConfiguring)
+        {
+            Serial.println(F("WiFi WPS timeout, retrying"));
+            esp_wifi_wps_disable();
+            esp_wifi_wps_enable(&g_wifi_wps_config);
+            esp_wifi_wps_start(0);
+        }
         break;
     case SYSTEM_EVENT_STA_WPS_ER_PIN:
-        Serial.print(F("WiFi WPS_PIN = "));
-        Serial.println(wpspin2string(info.sta_er_pin.pin_code));
+        if (g_isConfiguring)
+        {
+            Serial.print(F("WiFi WPS_PIN = "));
+            Serial.println(wpspin2string(info.sta_er_pin.pin_code));
+        }
         break;
     default:
         break;
@@ -825,6 +890,5 @@ static void wifi_callback(WiFiEvent_t event, system_event_info_t info)
 static void ble_scan_ended_callback(NimBLEScanResults results)
 {
 }
-
 
 #endif

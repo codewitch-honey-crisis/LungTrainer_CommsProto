@@ -3,12 +3,14 @@
 #include <WiFi.h>
 #include <NimBLEDevice.h>
 #include <esp_wps.h>
+#include <esp_wifi.h>
 #include <WiFiClient.h>
 #include <WiFiUDP.h>
 #include <ArduinoJson.h>
 #include "configuration.h"
 #include "upnp.h"
 #include "status_led.h"
+#define CONNECT_TIMEOUT 30000
 class Connection {
 
     
@@ -139,7 +141,15 @@ public:
                     if(g_config.isWiFiSet()) {
                         Serial.println(F("WiFi starting radio"));
                         WiFi.mode(WIFI_MODE_STA);
-                        WiFi.begin(g_config.ssid(),g_config.passkey());
+                        Serial.print(F("WiFi SSID "));
+                        Serial.println(g_config.ssid());
+                        Serial.print(F("WiFi passkey "));
+                        Serial.println(g_config.passkey());
+                        WiFi.begin(g_config.ssid(),g_config.passkey());//,0,nullptr,true);
+                        
+                            esp_wifi_set_ps(WIFI_PS_MAX_MODEM);
+                        //WiFi.begin();
+                        
                     }
 
                 }
@@ -147,7 +157,7 @@ public:
             if(m_pairing) {
                 m_upnpServer.update();
 
-                if(60000<millis()-m_pairTS) {
+                if(CONNECT_TIMEOUT<millis()-m_pairTS) {
                     // timeout
                     m_pairTS = 0;
                     m_pair.type=0;
@@ -155,8 +165,14 @@ public:
                     Serial.println(F("Pairing timeout"));
                     g_statusLed.set(0,0,0);
                     // ensure the radio is off
-                    WiFi.disconnect(true);
-                    NimBLEDevice::deinit(true);
+                    //WiFi.mode(WIFI_MODE_NULL);
+                    //esp_wifi_stop();
+                    
+                    WiFi.disconnect();//true,true);
+                    if(g_bleIsInitialized) {
+                        NimBLEDevice::deinit(true);
+                        g_bleIsInitialized = false;
+                    }
                 }
             }
             
